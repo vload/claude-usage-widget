@@ -1,20 +1,20 @@
 # Claude Usage Tray
 
-Monitor your Claude API usage from the Windows system tray.
+Monitor your Claude API usage from the Windows system tray. A headless Playwright scraper fetches usage data from claude.ai and a WinForms tray app displays it.
 
-```
-scraper/scrape-usage.js  →  %APPDATA%/ClaudeUsageWidget/usage.json
-                                     ↑
-                            ClaudeUsageTray
-                            (System Tray Icon)
-```
+## Features
+
+- System tray icon with a fill bar showing current usage percentage
+- Left-click popup with per-section breakdowns (Current session, All models, Sonnet only, etc.)
+- Per-section progress bars, reset times, and last-updated timestamp
+- Auto-refreshes every 60 seconds via headless browser scrape
+- Manual refresh from right-click menu
 
 ## Prerequisites
 
 - Windows 10/11
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 - [Node.js](https://nodejs.org/)
-- [Playwright](https://playwright.dev/) (Firefox)
 
 ## Setup
 
@@ -26,60 +26,56 @@ npm install
 npx playwright install firefox
 ```
 
-### 2. Authenticate with Claude
-
-Run the scraper once manually — if you're not logged in, a Firefox window will open for you to sign in. Your session is saved to a persistent browser profile.
-
-```bash
-node scraper/scrape-usage.js
-```
-
-### 3. Run the system tray app
+### 2. Run the tray app
 
 ```bash
 dotnet run --project ClaudeUsageTray -c Release
 ```
 
-A tray icon appears in the notification area (click the `^` arrow if hidden).
+The tray icon appears in the notification area (click the `^` arrow if hidden).
 
 - **Hover** — tooltip with plan name, usage %, and reset time
-- **Left-click** — popup with detailed usage breakdown per section
+- **Left-click** — popup with detailed per-section usage breakdown
 - **Right-click → Refresh** — manually trigger a scrape
+- **Right-click → Login** — open a visible browser to (re-)authenticate with Claude
 - **Right-click → Exit** — close the app
 
-The app automatically runs the scraper every 60 seconds.
+On first launch, right-click the tray icon and click **Login** to open a browser and sign in to Claude. The session is saved for future headless scrapes.
 
-### 4. (Optional) Run on startup
+### 3. Run on startup (optional)
 
-First publish a self-contained exe:
+Publish a self-contained exe:
 
 ```bash
-dotnet publish ClaudeUsageTray -c Release -r win-x64 --self-contained -o ClaudeUsageTray/publish
+dotnet publish ClaudeUsageTray -c Release -r win-x64 --self-contained -o publish
 ```
 
-Then create a startup shortcut (PowerShell):
+Create a startup shortcut (PowerShell):
 
 ```powershell
+$exePath = Resolve-Path ".\publish\ClaudeUsageTray.exe"
 $ws = New-Object -ComObject WScript.Shell
 $s = $ws.CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\ClaudeUsageTray.lnk")
-$s.TargetPath = "FULL_PATH_TO\ClaudeUsageTray\publish\ClaudeUsageTray.exe"
-$s.WorkingDirectory = "FULL_PATH_TO\ClaudeUsageTray\publish"
+$s.TargetPath = "$exePath"
+$s.WorkingDirectory = Split-Path "$exePath"
 $s.Save()
 ```
 
-Replace `FULL_PATH_TO` with the actual path to the project.
+To remove from startup, delete the shortcut from `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`.
 
 ## How it works
 
-1. The **scraper** (`scraper/scrape-usage.js`) uses Playwright Firefox to load `claude.ai/settings/usage`, parse the usage percentages, and write the result to `%APPDATA%/ClaudeUsageWidget/usage.json`.
+1. **Scraper** (`scraper/scrape-usage.js`) — Uses Playwright Firefox to load `claude.ai/settings/usage` headlessly, parses the usage percentages from the page, and writes the result to `%APPDATA%/ClaudeUsageWidget/usage.json`. Pass `--login` to open a visible browser for authentication.
 
-2. The **tray app** (`ClaudeUsageTray/`) reads that JSON file and displays:
-   - A bar icon (white background, orange fill) showing overall usage
-   - A popup window with per-section progress bars, reset times, and last-updated timestamp
+2. **Tray app** (`ClaudeUsageTray/`) — Reads `usage.json` and displays a tray icon with an orange fill bar proportional to usage. Left-clicking shows a popup with per-section progress bars. The app runs the scraper automatically every 60 seconds.
+
+## Re-authenticating
+
+If your session expires, the tray will show "Error". Right-click the tray icon and click **Login** to re-authenticate.
 
 ## Project structure
 
 ```
 ClaudeUsageTray/   C# WinForms system tray app
-scraper/           Node.js + Playwright scraper
+scraper/           Node.js + Playwright Firefox scraper
 ```

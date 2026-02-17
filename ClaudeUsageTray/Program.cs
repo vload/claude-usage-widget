@@ -24,7 +24,7 @@ sealed class TrayContext : ApplicationContext
         "ClaudeUsageWidget", "usage.json");
 
     private static readonly string ScraperPath =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "scraper", "scrape-usage.js"));
+        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scraper", "scrape-usage.js"));
 
     private static readonly Color DarkBlue = Color.FromArgb(30, 58, 138);
     private static readonly Color White = Color.White;
@@ -44,6 +44,7 @@ sealed class TrayContext : ApplicationContext
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Refresh", null, (_, _) => RunScraper());
+        menu.Items.Add("Login", null, (_, _) => RunScraper(login: true));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); });
 
@@ -101,34 +102,69 @@ sealed class TrayContext : ApplicationContext
             var tip = $"{_planName} — {_usedPercent}% used\nResets: {_resetDate}";
             _icon.Text = tip.Length > 127 ? tip[..127] : tip;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            _planName = "Load error";
+            _usageText = ex.Message;
+            var tip = $"Failed to read usage.json:\n{ex.Message}";
+            _icon.Text = tip.Length > 127 ? tip[..127] : tip;
+        }
     }
 
-    private void RunScraper()
+    private void RunScraper(bool login = false)
     {
         var scraperFull = Path.GetFullPath(ScraperPath);
-        if (!File.Exists(scraperFull)) return;
+        if (!File.Exists(scraperFull))
+        {
+            _planName = "Scraper not found";
+            _usageText = scraperFull;
+            _icon.Text = $"Scraper not found:\n{scraperFull}";
+            return;
+        }
 
         var scraperDir = Path.GetDirectoryName(scraperFull)!;
         Task.Run(() =>
         {
+            string stderr = "";
+            int exitCode = -1;
             try
             {
-                var psi = new ProcessStartInfo("node", scraperFull)
+                var args = login ? $"{scraperFull} --login" : scraperFull;
+                var psi = new ProcessStartInfo("node", args)
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true,
+                    RedirectStandardError = true,
                     WorkingDirectory = scraperDir
                 };
                 var proc = Process.Start(psi);
-                proc?.WaitForExit(60000);
+                if (proc != null)
+                {
+                    stderr = proc.StandardError.ReadToEnd();
+                    proc.WaitForExit(60000);
+                    exitCode = proc.ExitCode;
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                stderr = ex.Message;
+            }
+
+            void Update()
+            {
+                LoadData();
+                if (exitCode != 0 && _planName == "Error")
+                {
+                    var shortErr = stderr.Length > 200 ? stderr[..200] : stderr;
+                    var tip = $"Scraper failed (exit {exitCode})\n{shortErr}";
+                    _icon.Text = tip.Length > 127 ? tip[..127] : tip;
+                }
+            }
 
             if (_icon.ContextMenuStrip?.InvokeRequired == true)
-                _icon.ContextMenuStrip.Invoke(LoadData);
+                _icon.ContextMenuStrip.Invoke(Update);
             else
-                LoadData();
+                Update();
         });
     }
 
@@ -136,20 +172,24 @@ sealed class TrayContext : ApplicationContext
     {
         percent = Math.Clamp(percent, 0, 100);
         const int size = 32;
-        using var bmp = new Bitmap(size, size);
-        using var g = Graphics.FromImage(bmp);
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Color.Transparent);
+        var bmp = new Bitmap(size, size);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            g.FillRectangle(Brushes.White, 0, 0, size, size);
 
-        // White background, full size
-        g.FillRectangle(Brushes.White, 0, 0, size, size);
+            int fillW = (int)(size * percent / 100.0);
+            if (fillW > 0)
+            {
+                using var brush = new SolidBrush(Color.FromArgb(234, 120, 0));
+                g.FillRectangle(brush, 0, 0, fillW, size);
+            }
+        }
 
-        // Orange fill left to right
-        int fillW = (int)(size * percent / 100.0);
-        if (fillW > 0)
-            g.FillRectangle(new SolidBrush(Color.FromArgb(234, 120, 0)), 0, 0, fillW, size);
-
-        return System.Drawing.Icon.FromHandle(bmp.GetHicon());
+        var hIcon = bmp.GetHicon();
+        bmp.Dispose();
+        return Icon.FromHandle(hIcon);
     }
 
     protected override void Dispose(bool disposing)
