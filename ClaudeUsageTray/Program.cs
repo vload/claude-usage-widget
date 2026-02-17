@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows.Forms;
 
@@ -11,9 +12,36 @@ static class Program
     [STAThread]
     static void Main()
     {
-        Application.EnableVisualStyles();
-        Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new TrayContext());
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            var logPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "ClaudeUsageWidget", "crash.log");
+            try { File.WriteAllText(logPath, e.ExceptionObject?.ToString() ?? "unknown"); } catch { }
+        };
+
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) =>
+        {
+            var logPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "ClaudeUsageWidget", "crash.log");
+            try { File.WriteAllText(logPath, e.Exception.ToString()); } catch { }
+        };
+
+        try
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new TrayContext());
+        }
+        catch (Exception ex)
+        {
+            var logPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "ClaudeUsageWidget", "crash.log");
+            try { File.WriteAllText(logPath, ex.ToString()); } catch { }
+        }
     }
 }
 
@@ -22,12 +50,6 @@ sealed class TrayContext : ApplicationContext
     private static readonly string UsageJsonPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ClaudeUsageWidget", "usage.json");
-
-    private static readonly string ScraperPath =
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scraper", "scrape-usage.js"));
-
-    private static readonly Color DarkBlue = Color.FromArgb(30, 58, 138);
-    private static readonly Color White = Color.White;
 
     private readonly NotifyIcon _icon;
     private readonly System.Windows.Forms.Timer _timer;
@@ -39,6 +61,22 @@ sealed class TrayContext : ApplicationContext
     private int _usedPercent;
     private string _lastUpdated = "never";
     private JsonElement _sections;
+
+    private static string FindScraperPath()
+    {
+        // Walk up from exe directory looking for scraper/scrape-usage.js
+        var dir = AppContext.BaseDirectory;
+        for (int i = 0; i < 8; i++)
+        {
+            var candidate = Path.Combine(dir, "scraper", "scrape-usage.js");
+            if (File.Exists(candidate))
+                return Path.GetFullPath(candidate);
+            var parent = Path.GetDirectoryName(dir);
+            if (parent == null || parent == dir) break;
+            dir = parent;
+        }
+        return "";
+    }
 
     public TrayContext()
     {
@@ -98,6 +136,7 @@ sealed class TrayContext : ApplicationContext
             if (root.TryGetProperty("scrapedAt", out var sa) && DateTime.TryParse(sa.GetString(), out var dt))
                 _lastUpdated = dt.ToLocalTime().ToString("h:mm tt");
 
+            _icon.Icon?.Dispose();
             _icon.Icon = MakeBatteryIcon(_usedPercent);
             var tip = $"{_planName} — {_usedPercent}% used\nResets: {_resetDate}";
             _icon.Text = tip.Length > 127 ? tip[..127] : tip;
@@ -113,12 +152,12 @@ sealed class TrayContext : ApplicationContext
 
     private void RunScraper(bool login = false)
     {
-        var scraperFull = Path.GetFullPath(ScraperPath);
-        if (!File.Exists(scraperFull))
+        var scraperFull = FindScraperPath();
+        if (string.IsNullOrEmpty(scraperFull))
         {
             _planName = "Scraper not found";
-            _usageText = scraperFull;
-            _icon.Text = $"Scraper not found:\n{scraperFull}";
+            _usageText = $"Searched from {AppContext.BaseDirectory}";
+            _icon.Text = "Scraper not found";
             return;
         }
 
@@ -129,11 +168,11 @@ sealed class TrayContext : ApplicationContext
             int exitCode = -1;
             try
             {
-                var args = login ? $"{scraperFull} --login" : scraperFull;
+                var args = login ? $"\"{scraperFull}\" --login" : $"\"{scraperFull}\"";
                 var psi = new ProcessStartInfo("node", args)
                 {
                     UseShellExecute = false,
-                    CreateNoWindow = true,
+                    CreateNoWindow = !login,
                     RedirectStandardError = true,
                     WorkingDirectory = scraperDir
                 };
@@ -141,7 +180,7 @@ sealed class TrayContext : ApplicationContext
                 if (proc != null)
                 {
                     stderr = proc.StandardError.ReadToEnd();
-                    proc.WaitForExit(60000);
+                    proc.WaitForExit(120000);
                     exitCode = proc.ExitCode;
                 }
             }
@@ -168,11 +207,14 @@ sealed class TrayContext : ApplicationContext
         });
     }
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
+
     private static Icon MakeBatteryIcon(int percent)
     {
         percent = Math.Clamp(percent, 0, 100);
         const int size = 32;
-        var bmp = new Bitmap(size, size);
+        using var bmp = new Bitmap(size, size);
         using (var g = Graphics.FromImage(bmp))
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -188,8 +230,9 @@ sealed class TrayContext : ApplicationContext
         }
 
         var hIcon = bmp.GetHicon();
-        bmp.Dispose();
-        return Icon.FromHandle(hIcon);
+        var icon = (Icon)Icon.FromHandle(hIcon).Clone();
+        DestroyIcon(hIcon);
+        return icon;
     }
 
     protected override void Dispose(bool disposing)
@@ -206,8 +249,8 @@ sealed class TrayContext : ApplicationContext
 
 sealed class UsagePopup : Form
 {
-    private static readonly Color Orange = Color.FromArgb(217, 119, 87);  // #d97757
-    private static readonly Color BgColor = Color.FromArgb(38, 38, 36);   // #262624
+    private static readonly Color Orange = Color.FromArgb(217, 119, 87);
+    private static readonly Color BgColor = Color.FromArgb(38, 38, 36);
 
     public UsagePopup(string planName, string resetDate, int usedPercent, string usageText, JsonElement sections, string lastUpdated)
     {
@@ -216,22 +259,18 @@ sealed class UsagePopup : Form
         ShowInTaskbar = false;
         TopMost = true;
         BackColor = BgColor;
-        Size = new Size(300, 0); // height calculated below
+        Size = new Size(300, 0);
 
-        // Build controls
         int y = 12;
 
-        // Reset time at top
         var resetLabel = MakeLabel($"Resets {resetDate}", 12, y, 276, Color.FromArgb(180, 170, 160), 9f);
         Controls.Add(resetLabel);
         y += 22;
 
-        // Plan name
         var planLabel = MakeLabel(planName, 12, y, 276, Color.White, 14f, FontStyle.Bold);
         Controls.Add(planLabel);
         y += 30;
 
-        // Section details
         if (sections.ValueKind == JsonValueKind.Array)
         {
             bool first = true;
@@ -269,11 +308,9 @@ sealed class UsagePopup : Form
         y += 18;
         ClientSize = new Size(300, y);
 
-        // Position above taskbar near tray
         var workArea = Screen.PrimaryScreen!.WorkingArea;
         Location = new Point(workArea.Right - Width - 8, workArea.Bottom - Height - 8);
 
-        // Close on deactivate
         Deactivate += (_, _) => Close();
     }
 
@@ -287,7 +324,6 @@ sealed class UsagePopup : Form
         Controls.Add(pctLabel);
         y += 20;
 
-        // Track
         var track = new Panel
         {
             Location = new Point(12, y),
@@ -296,7 +332,6 @@ sealed class UsagePopup : Form
         };
         Controls.Add(track);
 
-        // Fill
         int fillW = Math.Max(0, (int)(276.0 * percent / 100));
         if (fillW > 0)
         {
@@ -328,7 +363,6 @@ sealed class UsagePopup : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
-        // Rounded border
         using var pen = new Pen(Color.FromArgb(60, 60, 56), 1);
         e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
     }
