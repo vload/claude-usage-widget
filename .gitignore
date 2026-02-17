@@ -1,0 +1,8 @@
+bin/
+obj/
+publish/
+.vs/
+*.suo
+*.user
+scraper/firefox-profile/
+scraper/node_modules/
