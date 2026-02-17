@@ -1,107 +1,205 @@
-const { firefox } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const https = require('https');
 
 const APPDATA = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
 const DATA_DIR = path.join(APPDATA, 'ClaudeUsageWidget');
 const OUTPUT_FILE = path.join(DATA_DIR, 'usage.json');
-const PROFILE_DIR = path.join(DATA_DIR, 'browser-profile');
+const CREDENTIALS_PATH = path.join(os.homedir(), '.claude', '.credentials.json');
 
-const LOGIN_MODE = process.argv.includes('--login');
+const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+const TOKEN_URL = 'https://api.anthropic.com/v1/oauth/token';
+const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 
-async function scrapeUsage() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function readCredentials() {
+  const raw = fs.readFileSync(CREDENTIALS_PATH, 'utf-8');
+  return JSON.parse(raw);
+}
 
-  const context = await firefox.launchPersistentContext(PROFILE_DIR, {
-    headless: !LOGIN_MODE,
-    viewport: { width: 1280, height: 720 },
-    locale: 'en-US',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0',
-    firefoxUserPrefs: {
-      'dom.webdriver.enabled': false,
-      'useAutomationExtension': false,
+function writeCredentials(creds) {
+  fs.writeFileSync(CREDENTIALS_PATH, JSON.stringify(creds));
+}
+
+function httpRequest(url, options, body) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, options, res => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve({ status: res.statusCode, data }));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function refreshToken(creds) {
+  const body = JSON.stringify({
+    grant_type: 'refresh_token',
+    refresh_token: creds.claudeAiOauth.refreshToken,
+    client_id: CLIENT_ID,
+  });
+
+  const res = await httpRequest(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  }, body);
+
+  if (res.status !== 200) {
+    throw new Error(`Token refresh failed (${res.status}): ${res.data}`);
+  }
+
+  const tokens = JSON.parse(res.data);
+  creds.claudeAiOauth.accessToken = tokens.access_token;
+  creds.claudeAiOauth.refreshToken = tokens.refresh_token;
+  creds.claudeAiOauth.expiresAt = Date.now() + (tokens.expires_in * 1000);
+  writeCredentials(creds);
+  console.log('Token refreshed successfully');
+  return creds;
+}
+
+async function fetchUsage(accessToken) {
+  const res = await httpRequest(USAGE_URL, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'anthropic-beta': 'oauth-2025-04-20',
+      'Content-Type': 'application/json',
+      'User-Agent': 'claude-code/2.0.32',
+      'Accept': 'application/json',
     },
   });
 
-  const page = context.pages()[0] || await context.newPage();
-
-  await page.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  });
-
-  try {
-    console.log(LOGIN_MODE ? 'Opening browser for login...' : 'Scraping usage (headless)...');
-    await page.goto('https://claude.ai/settings/usage', {
-      waitUntil: 'networkidle',
-      timeout: LOGIN_MODE ? 60000 : 30000,
-    });
-
-    if (!page.url().includes('/settings/usage')) {
-      if (LOGIN_MODE) {
-        console.log('Please log in to Claude, then navigate to Settings > Usage.');
-        await page.waitForURL('**/settings/usage', { timeout: 300000 });
-        await page.waitForLoadState('networkidle');
-      } else {
-        throw new Error('Not logged in. Run with --login to authenticate.');
-      }
-    }
-
-    await page.waitForTimeout(3000);
-
-    const usageData = await page.evaluate(() => {
-      const allText = document.body.innerText;
-
-      let planName = 'Unknown';
-      const planMatch = allText.match(/(\w+)\s+plan/i);
-      if (planMatch) planName = planMatch[1] + ' Plan';
-
-      const sections = [];
-      const sectionPattern = /(Current session|All models|Sonnet only|Haiku only|Opus only)[\s\S]*?(\d+)%\s*used/gi;
-      let match;
-      while ((match = sectionPattern.exec(allText)) !== null) {
-        const name = match[1];
-        const percent = parseInt(match[2]);
-        const chunk = match[0];
-        let resetText = '';
-        const resetMatch = chunk.match(/Resets?\s+((?:in\s+)?[^%]*?)(?:\d+%|$)/i);
-        if (resetMatch) resetText = resetMatch[1].trim().replace(/\n/g, ' ');
-        sections.push({ name, percent, resetText });
-      }
-
-      const currentSession = sections.find(s => /current session/i.test(s.name));
-      const allModels = sections.find(s => /all models/i.test(s.name));
-      const primary = currentSession || allModels || sections[0];
-
-      return {
-        planName,
-        sections,
-        usedPercent: primary ? primary.percent : 0,
-        remainingPercent: primary ? (100 - primary.percent) : 100,
-        resetDate: primary ? primary.resetText : '',
-        usageText: primary ? `${primary.name}: ${primary.percent}% used` : '0% used',
-        scrapedAt: new Date().toISOString(),
-      };
-    });
-
-    fs.writeFileSync(OUTPUT_FILE, JSON.stringify(usageData, null, 2));
-    console.log('Usage data saved to', OUTPUT_FILE);
-    console.log(JSON.stringify(usageData, null, 2));
-  } catch (err) {
-    console.error('Error scraping usage:', err.message);
-    const errorData = {
-      planName: 'Error',
-      usageText: 'Could not fetch usage data',
-      usedPercent: 0,
-      remainingPercent: 100,
-      resetDate: '',
-      error: err.message,
-      scrapedAt: new Date().toISOString(),
-    };
-    fs.writeFileSync(OUTPUT_FILE, JSON.stringify(errorData, null, 2));
-  } finally {
-    await context.close();
+  if (res.status === 401 || res.status === 403) {
+    return null; // Token expired, caller should refresh
   }
+  if (res.status !== 200) {
+    throw new Error(`Usage API error (${res.status}): ${res.data}`);
+  }
+  return JSON.parse(res.data);
 }
 
-scrapeUsage();
+function formatResetTime(resetsAt) {
+  if (!resetsAt) return '';
+  const reset = new Date(resetsAt);
+  const now = new Date();
+  const diffMs = reset - now;
+  if (diffMs <= 0) return 'now';
+  const hours = Math.floor(diffMs / 3600000);
+  const mins = Math.floor((diffMs % 3600000) / 60000);
+  if (hours > 0) return `in ${hours}h ${mins}m`;
+  return `in ${mins}m`;
+}
+
+function transformUsageData(raw, subscriptionType) {
+  const planName = (subscriptionType || 'Unknown').charAt(0).toUpperCase()
+    + (subscriptionType || 'unknown').slice(1) + ' Plan';
+
+  const sections = [];
+
+  if (raw.five_hour) {
+    sections.push({
+      name: 'Current session',
+      percent: Math.round(raw.five_hour.utilization || 0),
+      resetText: formatResetTime(raw.five_hour.resets_at),
+    });
+  }
+
+  if (raw.seven_day) {
+    sections.push({
+      name: 'All models',
+      percent: Math.round(raw.seven_day.utilization || 0),
+      resetText: formatResetTime(raw.seven_day.resets_at),
+    });
+  }
+
+  if (raw.seven_day_opus) {
+    sections.push({
+      name: 'Opus only',
+      percent: Math.round(raw.seven_day_opus.utilization || 0),
+      resetText: formatResetTime(raw.seven_day_opus.resets_at),
+    });
+  }
+
+  if (raw.seven_day_sonnet) {
+    sections.push({
+      name: 'Sonnet only',
+      percent: Math.round(raw.seven_day_sonnet.utilization || 0),
+      resetText: formatResetTime(raw.seven_day_sonnet.resets_at),
+    });
+  }
+
+  const primary = sections.find(s => s.name === 'Current session')
+    || sections.find(s => s.name === 'All models')
+    || sections[0];
+
+  return {
+    planName,
+    sections,
+    usedPercent: primary ? primary.percent : 0,
+    remainingPercent: primary ? (100 - primary.percent) : 100,
+    resetDate: primary ? primary.resetText : '',
+    usageText: primary ? `${primary.name}: ${primary.percent}% used` : '0% used',
+    scrapedAt: new Date().toISOString(),
+  };
+}
+
+async function main() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+
+  let creds;
+  try {
+    creds = readCredentials();
+  } catch {
+    throw new Error(`Cannot read credentials from ${CREDENTIALS_PATH}. Run "claude auth" first.`);
+  }
+
+  const oauth = creds.claudeAiOauth;
+  if (!oauth || !oauth.accessToken) {
+    throw new Error('No OAuth token found. Run "claude auth" first.');
+  }
+
+  // Check if token is expired
+  if (oauth.expiresAt && Date.now() > oauth.expiresAt - 60000) {
+    console.log('Token expired, refreshing...');
+    creds = await refreshToken(creds);
+  }
+
+  console.log('Fetching usage from API...');
+  let raw = await fetchUsage(creds.claudeAiOauth.accessToken);
+
+  // If unauthorized, try refreshing
+  if (raw === null) {
+    console.log('Token rejected, refreshing...');
+    creds = await refreshToken(creds);
+    raw = await fetchUsage(creds.claudeAiOauth.accessToken);
+    if (raw === null) {
+      throw new Error('Token refresh failed. Run "claude auth" to re-authenticate.');
+    }
+  }
+
+  const usageData = transformUsageData(raw, oauth.subscriptionType);
+
+  fs.writeFileSync(OUTPUT_FILE, JSON.stringify(usageData, null, 2));
+  console.log('Usage data saved to', OUTPUT_FILE);
+  console.log(JSON.stringify(usageData, null, 2));
+}
+
+main().catch(err => {
+  console.error('Error:', err.message);
+  const APPDATA_DIR = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+  const outDir = path.join(APPDATA_DIR, 'ClaudeUsageWidget');
+  const outFile = path.join(outDir, 'usage.json');
+  fs.mkdirSync(outDir, { recursive: true });
+  fs.writeFileSync(outFile, JSON.stringify({
+    planName: 'Error',
+    usageText: 'Could not fetch usage data',
+    usedPercent: 0,
+    remainingPercent: 100,
+    resetDate: '',
+    error: err.message,
+    scrapedAt: new Date().toISOString(),
+  }, null, 2));
+  process.exit(1);
+});
