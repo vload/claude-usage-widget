@@ -4,11 +4,12 @@ Monitor your Claude API usage from the Windows system tray. Reads OAuth credenti
 
 ## Features
 
-- System tray icon with a fill bar showing current usage percentage
+- System tray icon showing current usage percentage
+- Three icon styles (cycle via right-click menu): circle outline, rectangle fill bar, outside-in fill
 - Left-click popup with per-section breakdowns (Current session, All models, Sonnet only, etc.)
 - Per-section progress bars, reset times, and last-updated timestamp
 - Auto-refreshes every 60 seconds
-- Manual refresh from right-click menu
+- Single-instance guard — launching a second instance shows a dialog and exits
 
 ## Prerequisites
 
@@ -27,6 +28,7 @@ The tray icon appears in the notification area (click the `^` arrow if hidden).
 - **Hover** — tooltip with plan name, usage %, and reset time
 - **Left-click** — popup with detailed per-section usage breakdown
 - **Right-click → Refresh** — manually trigger a usage fetch
+- **Right-click → Icon: ...** — cycle between icon styles (Circle, Rectangle, Fill)
 - **Right-click → Exit** — close the app
 
 ### Run on startup (optional)
@@ -52,7 +54,7 @@ To remove from startup, delete the shortcut from `%APPDATA%\Microsoft\Windows\St
 
 ## How it works
 
-The app reads OAuth credentials from `~/.claude/.credentials.json` (created by `claude auth`), calls the Anthropic usage API, and displays the results as a tray icon with an orange fill bar. Left-clicking shows a popup with per-section progress bars. Auto-refreshes every 60 seconds.
+The app reads OAuth credentials from `~/.claude/.credentials.json` (created by `claude auth`), calls the Anthropic usage API, and displays the results as a tray icon. Left-clicking shows a popup with per-section progress bars. Auto-refreshes every 60 seconds.
 
 ## Re-authenticating
 

@@ -75,10 +75,14 @@ sealed class TrayContext : ApplicationContext
     private string _lastUpdated = "never";
     private List<UsageSection> _sections = new();
 
+    private static readonly string[] IconStyleNames = ["Circle", "Rectangle", "Fill"];
+    private int _iconStyle; // 0 = circle, 1 = rectangle
+
     public TrayContext()
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Refresh", null, (_, _) => FetchUsage());
+        menu.Items.Add($"Icon: {IconStyleNames[_iconStyle]}", null, (_, _) => CycleIconStyle(menu));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); });
 
@@ -86,7 +90,7 @@ sealed class TrayContext : ApplicationContext
         {
             Visible = true,
             ContextMenuStrip = menu,
-            Icon = MakeBatteryIcon(0),
+            Icon = MakeIcon(0),
             Text = "Claude Usage"
         };
         _icon.MouseClick += (_, e) =>
@@ -128,7 +132,7 @@ sealed class TrayContext : ApplicationContext
         _lastUpdated = DateTime.Now.ToString("h:mm tt");
 
         _icon.Icon?.Dispose();
-        _icon.Icon = MakeBatteryIcon(_usedPercent);
+        _icon.Icon = MakeIcon(_usedPercent);
         var tip = $"{_planName} — {_usedPercent}% used\nResets: {_resetDate}";
         _icon.Text = tip.Length > 127 ? tip[..127] : tip;
     }
@@ -283,10 +287,53 @@ sealed class TrayContext : ApplicationContext
         return hours > 0 ? $"in {hours}h {mins}m" : $"in {mins}m";
     }
 
+    private void CycleIconStyle(ContextMenuStrip menu)
+    {
+        _iconStyle = (_iconStyle + 1) % IconStyleNames.Length;
+        menu.Items[1].Text = $"Icon: {IconStyleNames[_iconStyle]}";
+        _icon.Icon?.Dispose();
+        _icon.Icon = MakeIcon(_usedPercent);
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
-    private static Icon MakeBatteryIcon(int percent)
+    private Icon MakeIcon(int percent) => _iconStyle switch
+    {
+        1 => MakeRectangleIcon(percent),
+        2 => MakeFillIcon(percent),
+        _ => MakeCircleIcon(percent),
+    };
+
+    private static Icon MakeCircleIcon(int percent)
+    {
+        percent = Math.Clamp(percent, 0, 100);
+        const int size = 32;
+        const float penWidth = 3.5f;
+        float inset = penWidth / 2f;
+        var arcRect = new RectangleF(inset, inset, size - penWidth, size - penWidth);
+
+        using var bmp = new Bitmap(size, size);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+
+            using var whitePen = new Pen(Color.White, penWidth);
+            g.DrawEllipse(whitePen, arcRect);
+
+            if (percent > 0)
+            {
+                float sweepAngle = -360f * percent / 100f;
+                using var orangePen = new Pen(Color.FromArgb(234, 120, 0), penWidth);
+                g.DrawArc(orangePen, arcRect, -90f, sweepAngle);
+            }
+        }
+
+        return BitmapToIcon(bmp);
+    }
+
+    private static Icon MakeRectangleIcon(int percent)
     {
         percent = Math.Clamp(percent, 0, 100);
         const int size = 32;
@@ -304,6 +351,48 @@ sealed class TrayContext : ApplicationContext
             }
         }
 
+        return BitmapToIcon(bmp);
+    }
+
+    private static Icon MakeFillIcon(int percent)
+    {
+        percent = Math.Clamp(percent, 0, 100);
+        const int size = 32;
+        float radius = size / 2f;
+        // Inner hole shrinks as percent grows: 100% = full circle, 0% = nothing
+        float holeRadius = radius * (1f - percent / 100f);
+
+        using var bmp = new Bitmap(size, size);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+
+            if (percent > 0)
+            {
+                // Draw full orange circle
+                using var brush = new SolidBrush(Color.FromArgb(234, 120, 0));
+                g.FillEllipse(brush, 0, 0, size, size);
+
+                // Punch out the inner hole with transparency
+                if (holeRadius > 0)
+                {
+                    float d = holeRadius * 2;
+                    using var path = new System.Drawing.Drawing2D.GraphicsPath();
+                    path.AddEllipse(radius - holeRadius, radius - holeRadius, d, d);
+                    using var region = new Region(path);
+                    g.SetClip(region, System.Drawing.Drawing2D.CombineMode.Replace);
+                    g.Clear(Color.Transparent);
+                    g.ResetClip();
+                }
+            }
+        }
+
+        return BitmapToIcon(bmp);
+    }
+
+    private static Icon BitmapToIcon(Bitmap bmp)
+    {
         var hIcon = bmp.GetHicon();
         var icon = (Icon)Icon.FromHandle(hIcon).Clone();
         DestroyIcon(hIcon);
