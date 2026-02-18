@@ -5,5 +5,3 @@ publish/
 *.suo
 *.user
 .claude/
-scraper/firefox-profile/
-scraper/node_modules/
