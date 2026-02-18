@@ -20,10 +20,15 @@ jobs:
       - name: Publish
         run: dotnet publish ClaudeUsageTray -c Release --self-contained -o publish
 
-      - name: Zip output
-        run: Compress-Archive -Path publish/* -DestinationPath ClaudeUsageTray-win-x64.zip
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$version installer.iss
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ClaudeUsageTray-win-x64.zip
+          files: ClaudeUsageTraySetup.exe
