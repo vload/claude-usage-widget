@@ -76,7 +76,7 @@ sealed class TrayContext : ApplicationContext
     private List<UsageSection> _sections = new();
 
     private static readonly string[] IconStyleNames = ["Circle", "Rectangle", "Fill"];
-    private int _iconStyle; // 0 = circle, 1 = rectangle
+    private int _iconStyle = 2; // 0 = circle, 1 = rectangle, 2 = fill
 
     public TrayContext()
     {
