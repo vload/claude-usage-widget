@@ -42,6 +42,7 @@ static class Program
 
         try
         {
+            Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new TrayContext());
@@ -416,6 +417,10 @@ sealed class UsagePopup : Form
     private static readonly Color Orange = Color.FromArgb(217, 119, 87);
     private static readonly Color BgColor = Color.FromArgb(38, 38, 36);
 
+    private readonly float _dpi;
+    private int S(int value) => (int)(value * _dpi / 96f);
+    private float S(float value) => value * _dpi / 96f;
+
     public UsagePopup(string planName, string resetDate, List<UsageSection> sections, string lastUpdated)
     {
         FormBorderStyle = FormBorderStyle.None;
@@ -423,88 +428,90 @@ sealed class UsagePopup : Form
         ShowInTaskbar = false;
         TopMost = true;
         BackColor = BgColor;
-        Size = new Size(300, 0);
+        _dpi = DeviceDpi;
+        Size = new Size(S(300), 0);
 
-        int y = 12;
+        int y = S(12);
 
-        var resetLabel = MakeLabel($"Resets {resetDate}", 12, y, 276, Color.FromArgb(180, 170, 160), 9f);
+        var resetLabel = MakeLabel($"Resets {resetDate}", S(12), y, S(276), Color.FromArgb(180, 170, 160), S(9f));
         Controls.Add(resetLabel);
-        y += 22;
+        y += S(22);
 
-        var planLabel = MakeLabel(planName, 12, y, 276, Color.White, 14f, FontStyle.Bold);
+        var planLabel = MakeLabel(planName, S(12), y, S(276), Color.White, S(14f), FontStyle.Bold);
         Controls.Add(planLabel);
-        y += 30;
+        y += S(30);
 
         bool first = true;
         foreach (var sec in sections)
         {
             if (!first)
             {
-                y += 4;
-                var sep = new Panel { Location = new Point(12, y), Size = new Size(276, 1), BackColor = Color.FromArgb(60, 60, 56) };
+                y += S(4);
+                var sep = new Panel { Location = new Point(S(12), y), Size = new Size(S(276), 1), BackColor = Color.FromArgb(60, 60, 56) };
                 Controls.Add(sep);
-                y += 8;
+                y += S(8);
             }
             first = false;
 
             y = AddProgressBar($"{sec.Name}: {sec.Percent}%", sec.Percent, y);
             if (!string.IsNullOrEmpty(sec.ResetText))
             {
-                var rl = MakeLabel($"Resets {sec.ResetText}", 12, y, 276, Color.FromArgb(140, 130, 120), 7.5f);
+                var rl = MakeLabel($"Resets {sec.ResetText}", S(12), y, S(276), Color.FromArgb(140, 130, 120), S(7.5f));
                 Controls.Add(rl);
-                y += 16;
+                y += S(16);
             }
         }
 
-        y += 8;
-        var sep2 = new Panel { Location = new Point(12, y), Size = new Size(276, 1), BackColor = Color.FromArgb(60, 60, 56) };
+        y += S(8);
+        var sep2 = new Panel { Location = new Point(S(12), y), Size = new Size(S(276), 1), BackColor = Color.FromArgb(60, 60, 56) };
         Controls.Add(sep2);
-        y += 6;
-        var updatedLabel = MakeLabel($"Updated {lastUpdated}", 12, y, 276, Color.FromArgb(140, 130, 120), 7.5f);
+        y += S(6);
+        var updatedLabel = MakeLabel($"Updated {lastUpdated}", S(12), y, S(276), Color.FromArgb(140, 130, 120), S(7.5f));
         Controls.Add(updatedLabel);
-        y += 18;
-        ClientSize = new Size(300, y);
+        y += S(18);
+        ClientSize = new Size(S(300), y);
 
         var workArea = Screen.PrimaryScreen!.WorkingArea;
-        Location = new Point(workArea.Right - Width - 8, workArea.Bottom - Height - 8);
+        Location = new Point(workArea.Right - Width - S(8), workArea.Bottom - Height - S(8));
 
         Deactivate += (_, _) => Close();
     }
 
     private int AddProgressBar(string label, int percent, int y)
     {
-        var lbl = MakeLabel(label, 12, y, 220, Color.FromArgb(200, 190, 180), 9f);
+        var lbl = MakeLabel(label, S(12), y, S(220), Color.FromArgb(200, 190, 180), S(9f));
         Controls.Add(lbl);
 
-        var pctLabel = MakeLabel($"{percent}%", 232, y, 56, Color.White, 9f, FontStyle.Bold);
+        var pctLabel = MakeLabel($"{percent}%", S(232), y, S(56), Color.White, S(9f), FontStyle.Bold);
         pctLabel.TextAlign = ContentAlignment.TopRight;
         Controls.Add(pctLabel);
-        y += 20;
+        y += S(20);
 
+        int trackW = S(276);
         var track = new Panel
         {
-            Location = new Point(12, y),
-            Size = new Size(276, 8),
+            Location = new Point(S(12), y),
+            Size = new Size(trackW, S(8)),
             BackColor = Color.FromArgb(60, 60, 56)
         };
         Controls.Add(track);
 
-        int fillW = Math.Max(0, (int)(276.0 * percent / 100));
+        int fillW = Math.Max(0, (int)(trackW * percent / 100.0));
         if (fillW > 0)
         {
             var fill = new Panel
             {
                 Location = new Point(0, 0),
-                Size = new Size(fillW, 8),
+                Size = new Size(fillW, S(8)),
                 BackColor = Orange
             };
             track.Controls.Add(fill);
         }
 
-        return y + 14;
+        return y + S(14);
     }
 
-    private static Label MakeLabel(string text, int x, int y, int w, Color color, float fontSize, FontStyle style = FontStyle.Regular)
+    private Label MakeLabel(string text, int x, int y, int w, Color color, float fontSize, FontStyle style = FontStyle.Regular)
     {
         return new Label
         {
@@ -512,7 +519,7 @@ sealed class UsagePopup : Form
             Location = new Point(x, y),
             Size = new Size(w, (int)(fontSize * 2.2)),
             ForeColor = color,
-            Font = new Font("Segoe UI", fontSize, style),
+            Font = new Font("Segoe UI", fontSize, style, GraphicsUnit.Pixel),
             BackColor = Color.Transparent
         };
     }
