@@ -9,7 +9,7 @@ using System.Windows.Forms;
 
 namespace ClaudeUsageTray;
 
-record UsageSection(string Name, int Percent, string ResetText);
+record UsageSection(string Name, int Percent, string ResetText, double ResetMinutes);
 
 static class Program
 {
@@ -73,11 +73,12 @@ sealed class TrayContext : ApplicationContext
     private string _planName = "Loading...";
     private string _resetDate = "—";
     private int _usedPercent;
+    private double _resetMinutes;
     private string _lastUpdated = "never";
     private List<UsageSection> _sections = new();
 
-    private static readonly string[] IconStyleNames = ["Circle", "Rectangle", "Fill"];
-    private int _iconStyle = 2; // 0 = circle, 1 = rectangle, 2 = fill
+    private static readonly string[] IconStyleNames = ["Circle", "Rectangle", "Fill", "Split", "Timer"];
+    private int _iconStyle = 2; // 0 = circle, 1 = rectangle, 2 = fill, 3 = split, 4 = timer
 
     public TrayContext()
     {
@@ -129,6 +130,7 @@ sealed class TrayContext : ApplicationContext
                       ?? (sections.Count > 0 ? sections[0] : null);
 
         _usedPercent = primary?.Percent ?? 0;
+        _resetMinutes = primary?.ResetMinutes ?? 0;
         _resetDate = primary?.ResetText ?? "";
         _lastUpdated = DateTime.Now.ToString("h:mm tt");
 
@@ -264,8 +266,12 @@ sealed class TrayContext : ApplicationContext
             if (raw.TryGetProperty(prop, out var el) && el.ValueKind == JsonValueKind.Object)
             {
                 var pct = el.TryGetProperty("utilization", out var u) && u.ValueKind == JsonValueKind.Number ? (int)Math.Round(u.GetDouble()) : 0;
-                var resetText = el.TryGetProperty("resets_at", out var r) && r.ValueKind == JsonValueKind.String ? FormatResetTime(r.GetString()) : "";
-                sections.Add(new UsageSection(name, pct, resetText));
+                var resetsAtStr = el.TryGetProperty("resets_at", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
+                var resetText = FormatResetTime(resetsAtStr);
+                double resetMinutes = 0;
+                if (!string.IsNullOrEmpty(resetsAtStr) && DateTime.TryParse(resetsAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var resetDt))
+                    resetMinutes = Math.Max(0, (resetDt - DateTime.UtcNow).TotalMinutes);
+                sections.Add(new UsageSection(name, pct, resetText, resetMinutes));
             }
         }
 
@@ -303,6 +309,8 @@ sealed class TrayContext : ApplicationContext
     {
         1 => MakeRectangleIcon(percent),
         2 => MakeFillIcon(percent),
+        3 => MakeSplitIcon(percent, _resetMinutes),
+        4 => MakeTimerFillIcon(percent, _resetMinutes),
         _ => MakeCircleIcon(percent),
     };
 
@@ -387,6 +395,125 @@ sealed class TrayContext : ApplicationContext
                     g.ResetClip();
                 }
             }
+        }
+
+        return BitmapToIcon(bmp);
+    }
+
+    private static Icon MakeTimerFillIcon(int percent, double resetMinutes)
+    {
+        percent = Math.Clamp(percent, 0, 100);
+        const int size = 32;
+        float radius = size / 2f;
+
+        // Sweep angle: time remaining (5h/300min = 360°, 0min = 0°)
+        float timeFraction = (float)Math.Clamp(resetMinutes / 300.0, 0, 1);
+        float sweepAngle = 360f * timeFraction;
+
+        // Thickness: usage % (0% = nothing, 100% = solid pie wedge)
+        float thickness = radius * percent / 100f;
+
+        using var bmp = new Bitmap(size, size);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+
+            if (percent > 0 && sweepAngle > 0)
+            {
+                using var brush = new SolidBrush(Color.FromArgb(234, 120, 0));
+                g.FillPie(brush, 0, 0, size, size, -90f, -sweepAngle);
+
+                // Cut out inner hole if not fully solid
+                float holeRadius = radius - thickness;
+                if (holeRadius > 0.5f)
+                {
+                    float d = holeRadius * 2;
+                    float cx = radius, cy = radius;
+                    using var path = new System.Drawing.Drawing2D.GraphicsPath();
+                    path.AddEllipse(cx - holeRadius, cy - holeRadius, d, d);
+                    using var region = new Region(path);
+                    g.SetClip(region, System.Drawing.Drawing2D.CombineMode.Replace);
+                    g.Clear(Color.Transparent);
+                    g.ResetClip();
+                }
+            }
+        }
+
+        return BitmapToIcon(bmp);
+    }
+
+    private static Icon MakeSplitIcon(int percent, double resetMinutes)
+    {
+        // Top semicircle: usage % (fills from outside in, like Fill icon)
+        // Bottom semicircle: remaining time (0min = full, 300min/5h = empty)
+        percent = Math.Clamp(percent, 0, 100);
+        int timePct = Math.Clamp(100 - (int)(resetMinutes / 300.0 * 100), 0, 100);
+
+        const int size = 32;
+        float radius = size / 2f;
+        float cx = radius, cy = radius;
+        const float gap = 1f;
+
+        using var bmp = new Bitmap(size, size);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+
+            // Top semicircle (usage)
+            if (percent > 0)
+            {
+                float holeRadius = radius * (1f - percent / 100f);
+                using var path = new System.Drawing.Drawing2D.GraphicsPath();
+                path.AddArc(0, 0, size, size, 180, 180);
+                path.CloseFigure();
+                g.SetClip(path);
+
+                using var brush = new SolidBrush(Color.FromArgb(234, 120, 0));
+                g.FillEllipse(brush, 0, 0, size, size);
+
+                if (holeRadius > 0)
+                {
+                    float d = holeRadius * 2;
+                    using var holePath = new System.Drawing.Drawing2D.GraphicsPath();
+                    holePath.AddEllipse(cx - holeRadius, cy - holeRadius, d, d);
+                    using var holeRegion = new Region(holePath);
+                    g.SetClip(holeRegion, System.Drawing.Drawing2D.CombineMode.Intersect);
+                    g.Clear(Color.Transparent);
+                }
+                g.ResetClip();
+            }
+
+            // Bottom semicircle (time remaining)
+            if (timePct > 0)
+            {
+                float holeRadius = radius * (1f - timePct / 100f);
+                using var path = new System.Drawing.Drawing2D.GraphicsPath();
+                path.AddArc(0, 0, size, size, 0, 180);
+                path.CloseFigure();
+                g.SetClip(path);
+
+                using var brush = new SolidBrush(Color.White);
+                g.FillEllipse(brush, 0, 0, size, size);
+
+                if (holeRadius > 0)
+                {
+                    float d = holeRadius * 2;
+                    using var holePath = new System.Drawing.Drawing2D.GraphicsPath();
+                    holePath.AddEllipse(cx - holeRadius, cy - holeRadius, d, d);
+                    using var holeRegion = new Region(holePath);
+                    g.SetClip(holeRegion, System.Drawing.Drawing2D.CombineMode.Intersect);
+                    g.Clear(Color.Transparent);
+                }
+                g.ResetClip();
+            }
+
+            // Clear the gap between halves
+            using var gapBrush = new SolidBrush(Color.Transparent);
+            g.SetClip(new RectangleF(0, cy - gap / 2, size, gap));
+            g.Clear(Color.Transparent);
+            g.ResetClip();
         }
 
         return BitmapToIcon(bmp);
