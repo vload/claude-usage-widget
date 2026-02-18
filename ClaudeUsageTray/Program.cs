@@ -1,32 +1,43 @@
-using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace ClaudeUsageTray;
 
+record UsageSection(string Name, int Percent, string ResetText);
+
 static class Program
 {
+    private static readonly string CrashLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "ClaudeUsageWidget", "crash.log");
+
     [STAThread]
     static void Main()
     {
+        using var mutex = new Mutex(true, "ClaudeUsageWidget_SingleInstance", out bool createdNew);
+        if (!createdNew)
+        {
+            MessageBox.Show("Claude Usage Widget is already running.", "Already Running", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var crashDir = Path.GetDirectoryName(CrashLogPath)!;
+
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
-            var logPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "ClaudeUsageWidget", "crash.log");
-            try { File.WriteAllText(logPath, e.ExceptionObject?.ToString() ?? "unknown"); } catch { }
+            try { Directory.CreateDirectory(crashDir); File.WriteAllText(CrashLogPath, e.ExceptionObject?.ToString() ?? "unknown"); } catch { }
         };
 
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) =>
         {
-            var logPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "ClaudeUsageWidget", "crash.log");
-            try { File.WriteAllText(logPath, e.Exception.ToString()); } catch { }
+            try { Directory.CreateDirectory(crashDir); File.WriteAllText(CrashLogPath, e.Exception.ToString()); } catch { }
         };
 
         try
@@ -37,52 +48,37 @@ static class Program
         }
         catch (Exception ex)
         {
-            var logPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "ClaudeUsageWidget", "crash.log");
-            try { File.WriteAllText(logPath, ex.ToString()); } catch { }
+            try { Directory.CreateDirectory(crashDir); File.WriteAllText(CrashLogPath, ex.ToString()); } catch { }
         }
     }
 }
 
 sealed class TrayContext : ApplicationContext
 {
-    private static readonly string UsageJsonPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "ClaudeUsageWidget", "usage.json");
+    private static readonly string CredentialsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".claude", ".credentials.json");
 
-    private readonly NotifyIcon _icon;
+    private const string UsageUrl = "https://api.anthropic.com/api/oauth/usage";
+    private const string TokenUrl = "https://api.anthropic.com/v1/oauth/token";
+    private const string ClientId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+    private static readonly HttpClient Http = new();
+
+    private readonly NotifyIcon _icon = null!;
     private readonly System.Windows.Forms.Timer _timer;
     private UsagePopup? _popup;
 
     private string _planName = "Loading...";
-    private string _usageText = "Click Refresh";
     private string _resetDate = "—";
     private int _usedPercent;
     private string _lastUpdated = "never";
-    private JsonElement _sections;
-
-    private static string FindScraperPath()
-    {
-        // Walk up from exe directory looking for scraper/scrape-usage.js
-        var dir = AppContext.BaseDirectory;
-        for (int i = 0; i < 8; i++)
-        {
-            var candidate = Path.Combine(dir, "scraper", "scrape-usage.js");
-            if (File.Exists(candidate))
-                return Path.GetFullPath(candidate);
-            var parent = Path.GetDirectoryName(dir);
-            if (parent == null || parent == dir) break;
-            dir = parent;
-        }
-        return "";
-    }
+    private List<UsageSection> _sections = new();
 
     public TrayContext()
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("Refresh", null, (_, _) => RunScraper());
-        menu.Items.Add("Login", null, (_, _) => RunScraper(login: true));
+        menu.Items.Add("Refresh", null, (_, _) => FetchUsage());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); });
 
@@ -100,10 +96,10 @@ sealed class TrayContext : ApplicationContext
         };
 
         _timer = new System.Windows.Forms.Timer { Interval = 60 * 1000 };
-        _timer.Tick += (_, _) => RunScraper();
+        _timer.Tick += (_, _) => FetchUsage();
         _timer.Start();
 
-        LoadData();
+        FetchUsage();
     }
 
     private void TogglePopup()
@@ -114,97 +110,177 @@ sealed class TrayContext : ApplicationContext
             _popup = null;
             return;
         }
-        _popup = new UsagePopup(_planName, _resetDate, _usedPercent, _usageText, _sections, _lastUpdated);
+        _popup = new UsagePopup(_planName, _resetDate, _sections, _lastUpdated);
         _popup.Show();
     }
 
-    private void LoadData()
+    private void ApplyUsageData(string planName, List<UsageSection> sections)
     {
-        try
-        {
-            if (!File.Exists(UsageJsonPath)) return;
-            var json = File.ReadAllText(UsageJsonPath);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
+        _planName = planName;
+        _sections = sections;
 
-            _planName = root.TryGetProperty("planName", out var pn) ? pn.GetString() ?? "—" : "—";
-            _usageText = root.TryGetProperty("usageText", out var ut) ? ut.GetString() ?? "—" : "—";
-            _resetDate = root.TryGetProperty("resetDate", out var rd) ? rd.GetString() ?? "—" : "—";
-            _usedPercent = root.TryGetProperty("usedPercent", out var up) ? up.GetInt32() : 0;
-            if (root.TryGetProperty("sections", out var sec))
-                _sections = sec.Clone();
-            if (root.TryGetProperty("scrapedAt", out var sa) && DateTime.TryParse(sa.GetString(), out var dt))
-                _lastUpdated = dt.ToLocalTime().ToString("h:mm tt");
+        var primary = sections.Find(s => s.Name == "Current session")
+                      ?? sections.Find(s => s.Name == "All models")
+                      ?? (sections.Count > 0 ? sections[0] : null);
 
-            _icon.Icon?.Dispose();
-            _icon.Icon = MakeBatteryIcon(_usedPercent);
-            var tip = $"{_planName} — {_usedPercent}% used\nResets: {_resetDate}";
-            _icon.Text = tip.Length > 127 ? tip[..127] : tip;
-        }
-        catch (Exception ex)
-        {
-            _planName = "Load error";
-            _usageText = ex.Message;
-            var tip = $"Failed to read usage.json:\n{ex.Message}";
-            _icon.Text = tip.Length > 127 ? tip[..127] : tip;
-        }
+        _usedPercent = primary?.Percent ?? 0;
+        _resetDate = primary?.ResetText ?? "";
+        _lastUpdated = DateTime.Now.ToString("h:mm tt");
+
+        _icon.Icon?.Dispose();
+        _icon.Icon = MakeBatteryIcon(_usedPercent);
+        var tip = $"{_planName} — {_usedPercent}% used\nResets: {_resetDate}";
+        _icon.Text = tip.Length > 127 ? tip[..127] : tip;
     }
 
-    private void RunScraper(bool login = false)
+    private void ShowError(string message)
     {
-        var scraperFull = FindScraperPath();
-        if (string.IsNullOrEmpty(scraperFull))
-        {
-            _planName = "Scraper not found";
-            _usageText = $"Searched from {AppContext.BaseDirectory}";
-            _icon.Text = "Scraper not found";
-            return;
-        }
+        _planName = "Error";
+        var tip = $"Error: {message}";
+        _icon.Text = tip.Length > 127 ? tip[..127] : tip;
+    }
 
-        var scraperDir = Path.GetDirectoryName(scraperFull)!;
-        Task.Run(() =>
+    private void FetchUsage()
+    {
+        Task.Run(async () =>
         {
-            string stderr = "";
-            int exitCode = -1;
             try
             {
-                var args = login ? $"\"{scraperFull}\" --login" : $"\"{scraperFull}\"";
-                var psi = new ProcessStartInfo("node", args)
+                var (accessToken, subscriptionType) = await GetAccessTokenAsync();
+                var raw = await FetchUsageApiAsync(accessToken);
+                if (raw == null)
                 {
-                    UseShellExecute = false,
-                    CreateNoWindow = !login,
-                    RedirectStandardError = true,
-                    WorkingDirectory = scraperDir
-                };
-                var proc = Process.Start(psi);
-                if (proc != null)
-                {
-                    stderr = proc.StandardError.ReadToEnd();
-                    proc.WaitForExit(120000);
-                    exitCode = proc.ExitCode;
+                    (accessToken, subscriptionType) = await RefreshAndGetTokenAsync();
+                    raw = await FetchUsageApiAsync(accessToken);
+                    if (raw == null)
+                        throw new Exception("Auth failed. Run \"claude auth\".");
                 }
+
+                var (planName, sections) = TransformUsageData(raw.Value, subscriptionType);
+                InvokeOnUI(() => ApplyUsageData(planName, sections));
             }
             catch (Exception ex)
             {
-                stderr = ex.Message;
+                InvokeOnUI(() => ShowError(ex.Message));
             }
-
-            void Update()
-            {
-                LoadData();
-                if (exitCode != 0 && _planName == "Error")
-                {
-                    var shortErr = stderr.Length > 200 ? stderr[..200] : stderr;
-                    var tip = $"Scraper failed (exit {exitCode})\n{shortErr}";
-                    _icon.Text = tip.Length > 127 ? tip[..127] : tip;
-                }
-            }
-
-            if (_icon.ContextMenuStrip?.InvokeRequired == true)
-                _icon.ContextMenuStrip.Invoke(Update);
-            else
-                Update();
         });
+    }
+
+    private void InvokeOnUI(Action action)
+    {
+        if (_icon.ContextMenuStrip?.InvokeRequired == true)
+            _icon.ContextMenuStrip.Invoke(action);
+        else
+            action();
+    }
+
+    private static async Task<(string accessToken, string subscriptionType)> GetAccessTokenAsync()
+    {
+        if (!File.Exists(CredentialsPath))
+            throw new Exception($"No credentials. Run \"claude auth\".");
+
+        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(CredentialsPath));
+        var oauth = doc.RootElement.GetProperty("claudeAiOauth");
+        var token = oauth.GetProperty("accessToken").GetString()!;
+        var refreshToken = oauth.GetProperty("refreshToken").GetString()!;
+        var sub = oauth.TryGetProperty("subscriptionType", out var st) ? st.GetString() ?? "unknown" : "unknown";
+        var expiresAt = oauth.TryGetProperty("expiresAt", out var ea) ? ea.GetInt64() : 0;
+
+        if (expiresAt > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() > expiresAt - 60000)
+            return await RefreshAndGetTokenAsync(refreshToken, sub);
+
+        return (token, sub);
+    }
+
+    private static async Task<(string accessToken, string subscriptionType)> RefreshAndGetTokenAsync()
+    {
+        // Overload that reads credentials from file (used on auth failure retry)
+        using var doc = JsonDocument.Parse(await File.ReadAllTextAsync(CredentialsPath));
+        var oauth = doc.RootElement.GetProperty("claudeAiOauth");
+        var refreshToken = oauth.GetProperty("refreshToken").GetString()!;
+        var sub = oauth.TryGetProperty("subscriptionType", out var st) ? st.GetString() ?? "unknown" : "unknown";
+        return await RefreshAndGetTokenAsync(refreshToken, sub);
+    }
+
+    private static async Task<(string accessToken, string subscriptionType)> RefreshAndGetTokenAsync(string refreshToken, string subscriptionType)
+    {
+        var body = JsonSerializer.Serialize(new
+        {
+            grant_type = "refresh_token",
+            refresh_token = refreshToken,
+            client_id = ClientId
+        });
+
+        var resp = await Http.PostAsync(TokenUrl, new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+        if (!resp.IsSuccessStatusCode)
+            throw new Exception($"Token refresh failed ({(int)resp.StatusCode}). Run \"claude auth\".");
+
+        var tokens = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var newAccess = tokens.RootElement.GetProperty("access_token").GetString()!;
+        var newRefresh = tokens.RootElement.GetProperty("refresh_token").GetString()!;
+        var expiresIn = tokens.RootElement.GetProperty("expires_in").GetInt64();
+
+        // Update credentials file
+        var node = JsonNode.Parse(await File.ReadAllTextAsync(CredentialsPath))!;
+        var oauthNode = node["claudeAiOauth"]!;
+        oauthNode["accessToken"] = newAccess;
+        oauthNode["refreshToken"] = newRefresh;
+        oauthNode["expiresAt"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + expiresIn * 1000;
+        await File.WriteAllTextAsync(CredentialsPath, node.ToJsonString());
+
+        return (newAccess, subscriptionType);
+    }
+
+    private static async Task<JsonElement?> FetchUsageApiAsync(string accessToken)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Get, UsageUrl);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        req.Headers.Add("anthropic-beta", "oauth-2025-04-20");
+        req.Headers.Add("User-Agent", "claude-code/2.0.32");
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        var resp = await Http.SendAsync(req);
+        if (resp.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+            return null;
+        if (!resp.IsSuccessStatusCode)
+            throw new Exception($"Usage API error ({(int)resp.StatusCode})");
+
+        var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        return doc.RootElement.Clone();
+    }
+
+    private static (string planName, List<UsageSection> sections) TransformUsageData(JsonElement raw, string subscriptionType)
+    {
+        var planName = char.ToUpper(subscriptionType[0]) + subscriptionType[1..] + " Plan";
+        var sections = new List<UsageSection>();
+
+        void TryAdd(string prop, string name)
+        {
+            if (raw.TryGetProperty(prop, out var el) && el.ValueKind == JsonValueKind.Object)
+            {
+                var pct = el.TryGetProperty("utilization", out var u) && u.ValueKind == JsonValueKind.Number ? (int)Math.Round(u.GetDouble()) : 0;
+                var resetText = el.TryGetProperty("resets_at", out var r) && r.ValueKind == JsonValueKind.String ? FormatResetTime(r.GetString()) : "";
+                sections.Add(new UsageSection(name, pct, resetText));
+            }
+        }
+
+        TryAdd("five_hour", "Current session");
+        TryAdd("seven_day", "All models");
+        TryAdd("seven_day_opus", "Opus only");
+        TryAdd("seven_day_sonnet", "Sonnet only");
+
+        return (planName, sections);
+    }
+
+    private static string FormatResetTime(string? resetsAt)
+    {
+        if (string.IsNullOrEmpty(resetsAt) || !DateTime.TryParse(resetsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var reset))
+            return "";
+        var diff = reset - DateTime.UtcNow;
+        if (diff <= TimeSpan.Zero) return "now";
+        var hours = (int)diff.TotalHours;
+        var mins = diff.Minutes;
+        return hours > 0 ? $"in {hours}h {mins}m" : $"in {mins}m";
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -217,7 +293,6 @@ sealed class TrayContext : ApplicationContext
         using var bmp = new Bitmap(size, size);
         using (var g = Graphics.FromImage(bmp))
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.Transparent);
             g.FillRectangle(Brushes.White, 0, 0, size, size);
 
@@ -252,7 +327,7 @@ sealed class UsagePopup : Form
     private static readonly Color Orange = Color.FromArgb(217, 119, 87);
     private static readonly Color BgColor = Color.FromArgb(38, 38, 36);
 
-    public UsagePopup(string planName, string resetDate, int usedPercent, string usageText, JsonElement sections, string lastUpdated)
+    public UsagePopup(string planName, string resetDate, List<UsageSection> sections, string lastUpdated)
     {
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -271,31 +346,24 @@ sealed class UsagePopup : Form
         Controls.Add(planLabel);
         y += 30;
 
-        if (sections.ValueKind == JsonValueKind.Array)
+        bool first = true;
+        foreach (var sec in sections)
         {
-            bool first = true;
-            foreach (var sec in sections.EnumerateArray())
+            if (!first)
             {
-                var name = sec.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                var pct = sec.TryGetProperty("percent", out var p) ? p.GetInt32() : 0;
-                var reset = sec.TryGetProperty("resetText", out var r) ? r.GetString() ?? "" : "";
+                y += 4;
+                var sep = new Panel { Location = new Point(12, y), Size = new Size(276, 1), BackColor = Color.FromArgb(60, 60, 56) };
+                Controls.Add(sep);
+                y += 8;
+            }
+            first = false;
 
-                if (!first)
-                {
-                    y += 4;
-                    var sep = new Panel { Location = new Point(12, y), Size = new Size(276, 1), BackColor = Color.FromArgb(60, 60, 56) };
-                    Controls.Add(sep);
-                    y += 8;
-                }
-                first = false;
-
-                y = AddProgressBar($"{name}: {pct}%", pct, y);
-                if (!string.IsNullOrEmpty(reset))
-                {
-                    var rl = MakeLabel($"Resets {reset}", 12, y, 276, Color.FromArgb(140, 130, 120), 7.5f);
-                    Controls.Add(rl);
-                    y += 16;
-                }
+            y = AddProgressBar($"{sec.Name}: {sec.Percent}%", sec.Percent, y);
+            if (!string.IsNullOrEmpty(sec.ResetText))
+            {
+                var rl = MakeLabel($"Resets {sec.ResetText}", 12, y, 276, Color.FromArgb(140, 130, 120), 7.5f);
+                Controls.Add(rl);
+                y += 16;
             }
         }
 
