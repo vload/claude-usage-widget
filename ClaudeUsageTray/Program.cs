@@ -269,8 +269,8 @@ sealed class TrayContext : ApplicationContext
                 var resetsAtStr = el.TryGetProperty("resets_at", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
                 var resetText = FormatResetTime(resetsAtStr);
                 double resetMinutes = 0;
-                if (!string.IsNullOrEmpty(resetsAtStr) && DateTime.TryParse(resetsAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var resetDt))
-                    resetMinutes = Math.Max(0, (resetDt - DateTime.UtcNow).TotalMinutes);
+                if (!string.IsNullOrEmpty(resetsAtStr) && DateTimeOffset.TryParse(resetsAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var resetDto))
+                    resetMinutes = Math.Max(0, (resetDto.UtcDateTime - DateTime.UtcNow).TotalMinutes);
                 sections.Add(new UsageSection(name, pct, resetText, resetMinutes));
             }
         }
@@ -285,9 +285,9 @@ sealed class TrayContext : ApplicationContext
 
     private static string FormatResetTime(string? resetsAt)
     {
-        if (string.IsNullOrEmpty(resetsAt) || !DateTime.TryParse(resetsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var reset))
+        if (string.IsNullOrEmpty(resetsAt) || !DateTimeOffset.TryParse(resetsAt, null, System.Globalization.DateTimeStyles.RoundtripKind, out var resetOfs))
             return "";
-        var diff = reset - DateTime.UtcNow;
+        var diff = resetOfs.UtcDateTime - DateTime.UtcNow;
         if (diff <= TimeSpan.Zero) return "now";
         var hours = (int)diff.TotalHours;
         var mins = diff.Minutes;
