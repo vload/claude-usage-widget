@@ -76,6 +76,10 @@ sealed class TrayContext : ApplicationContext
     private double _resetMinutes;
     private string _lastUpdated = "never";
     private List<UsageSection> _sections = new();
+    private int _backoffMs = 60_000;
+
+    private const string StartupRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string StartupRegName = "ClaudeUsageTray";
 
     private static readonly string[] IconStyleNames = ["Circle", "Rectangle", "Fill", "Split", "Timer"];
     private int _iconStyle = 2; // 0 = circle, 1 = rectangle, 2 = fill, 3 = split, 4 = timer
@@ -85,6 +89,9 @@ sealed class TrayContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("Refresh", null, (_, _) => FetchUsage());
         menu.Items.Add($"Icon: {IconStyleNames[_iconStyle]}", null, (_, _) => CycleIconStyle(menu));
+        var startupItem = new ToolStripMenuItem("Run at startup") { Checked = IsStartupEnabled() };
+        startupItem.Click += (_, _) => { var on = !startupItem.Checked; SetStartupEnabled(on); startupItem.Checked = on; };
+        menu.Items.Add(startupItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => { _icon.Visible = false; Application.Exit(); });
 
@@ -116,7 +123,7 @@ sealed class TrayContext : ApplicationContext
             _popup = null;
             return;
         }
-        _popup = new UsagePopup(_planName, _resetDate, _sections, _lastUpdated);
+        _popup = new UsagePopup(_planName, _resetDate, _sections, _lastUpdated, FetchUsage);
         _popup.Show();
     }
 
@@ -164,7 +171,15 @@ sealed class TrayContext : ApplicationContext
                 }
 
                 var (planName, sections) = TransformUsageData(raw.Value, subscriptionType);
+                _backoffMs = 60_000;
+                _timer.Interval = 60_000;
                 InvokeOnUI(() => ApplyUsageData(planName, sections));
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                _backoffMs = Math.Min(Math.Max(_backoffMs * 2, 5 * 60_000), 40 * 60_000);
+                _timer.Interval = _backoffMs;
+                InvokeOnUI(() => ShowError($"Rate limited — retrying in {_backoffMs / 60_000}m"));
             }
             catch (Exception ex)
             {
@@ -249,6 +264,8 @@ sealed class TrayContext : ApplicationContext
         var resp = await Http.SendAsync(req);
         if (resp.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
             return null;
+        if (resp.StatusCode == (System.Net.HttpStatusCode)429)
+            throw new HttpRequestException("429", null, System.Net.HttpStatusCode.TooManyRequests);
         if (!resp.IsSuccessStatusCode)
             throw new Exception($"Usage API error ({(int)resp.StatusCode})");
 
@@ -292,6 +309,22 @@ sealed class TrayContext : ApplicationContext
         var hours = (int)diff.TotalHours;
         var mins = diff.Minutes;
         return hours > 0 ? $"in {hours}h {mins}m" : $"in {mins}m";
+    }
+
+    private static bool IsStartupEnabled()
+    {
+        using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(StartupRegKey);
+        return key?.GetValue(StartupRegName) != null;
+    }
+
+    private static void SetStartupEnabled(bool enabled)
+    {
+        using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(StartupRegKey, true);
+        if (key == null) return;
+        if (enabled)
+            key.SetValue(StartupRegName, $"\"{Application.ExecutablePath}\"");
+        else
+            key.DeleteValue(StartupRegName, false);
     }
 
     private void CycleIconStyle(ContextMenuStrip menu)
@@ -548,7 +581,7 @@ sealed class UsagePopup : Form
     private int S(int value) => (int)(value * _dpi / 96f);
     private float S(float value) => value * _dpi / 96f;
 
-    public UsagePopup(string planName, string resetDate, List<UsageSection> sections, string lastUpdated)
+    public UsagePopup(string planName, string resetDate, List<UsageSection> sections, string lastUpdated, Action? onRefresh = null)
     {
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -593,8 +626,16 @@ sealed class UsagePopup : Form
         var sep2 = new Panel { Location = new Point(S(12), y), Size = new Size(S(276), 1), BackColor = Color.FromArgb(60, 60, 56) };
         Controls.Add(sep2);
         y += S(6);
-        var updatedLabel = MakeLabel($"Updated {lastUpdated}", S(12), y, S(276), Color.FromArgb(140, 130, 120), S(7.5f));
+        var updatedLabel = MakeLabel($"Updated {lastUpdated}", S(12), y, S(220), Color.FromArgb(140, 130, 120), S(7.5f));
         Controls.Add(updatedLabel);
+        if (onRefresh != null)
+        {
+            var refreshBtn = MakeLabel("Refresh", S(232), y, S(56), Orange, S(7.5f));
+            refreshBtn.TextAlign = ContentAlignment.TopRight;
+            refreshBtn.Cursor = Cursors.Hand;
+            refreshBtn.Click += (_, _) => { onRefresh(); Close(); };
+            Controls.Add(refreshBtn);
+        }
         y += S(18);
         ClientSize = new Size(S(300), y);
 
