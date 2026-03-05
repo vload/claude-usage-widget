@@ -17,7 +17,7 @@ CloseApplicationsFilter=ClaudeUsageTray.exe
 Source: "publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 
 [Tasks]
-Name: "startup"; Description: "Run ClaudeUsageTray on Windows startup"; GroupDescription: "Additional options:"; Flags: checked
+Name: "startup"; Description: "Run ClaudeUsageTray on Windows startup"; GroupDescription: "Additional options:"
 
 [Icons]
 Name: "{group}\ClaudeUsageTray"; Filename: "{app}\ClaudeUsageTray.exe"
