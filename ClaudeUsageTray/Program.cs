@@ -108,7 +108,7 @@ sealed class TrayContext : ApplicationContext
                 TogglePopup();
         };
 
-        _timer = new System.Windows.Forms.Timer { Interval = 60 * 1000 };
+        _timer = new System.Windows.Forms.Timer { Interval = 5 * 60 * 1000 };
         _timer.Tick += (_, _) => FetchUsage();
         _timer.Start();
 
@@ -171,15 +171,16 @@ sealed class TrayContext : ApplicationContext
                 }
 
                 var (planName, sections) = TransformUsageData(raw.Value, subscriptionType);
-                _backoffMs = 60_000;
-                _timer.Interval = 60_000;
+                _backoffMs = 5 * 60_000;
+                _timer.Interval = 5 * 60_000;
                 InvokeOnUI(() => ApplyUsageData(planName, sections));
             }
             catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
                 _backoffMs = Math.Min(Math.Max(_backoffMs * 2, 5 * 60_000), 40 * 60_000);
                 _timer.Interval = _backoffMs;
-                InvokeOnUI(() => ShowError($"Rate limited — retrying in {_backoffMs / 60_000}m"));
+                if (_sections.Count == 0)
+                    InvokeOnUI(() => ShowError($"Rate limited — retrying in {_backoffMs / 60_000}m"));
             }
             catch (Exception ex)
             {
@@ -258,7 +259,7 @@ sealed class TrayContext : ApplicationContext
         var req = new HttpRequestMessage(HttpMethod.Get, UsageUrl);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         req.Headers.Add("anthropic-beta", "oauth-2025-04-20");
-        req.Headers.Add("User-Agent", "claude-code/2.0.32");
+        req.Headers.Add("User-Agent", "claude-code/2.1.69");
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
         var resp = await Http.SendAsync(req);
