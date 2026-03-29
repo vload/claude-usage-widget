@@ -5,3 +5,5 @@ publish/
 *.suo
 *.user
 .claude/
+.serena/
+node_modules/
